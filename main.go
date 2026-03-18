@@ -239,12 +239,29 @@ func newSender(key string) Sender {
 
 // ── 工具函数 ──────────────────────────────────────────────
 
+var logFile = filepath.Join(os.TempDir(), "claude-notify.log")
+
+func logError(format string, args ...any) {
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), msg)
+}
+
 var httpClient = &http.Client{Timeout: 5 * time.Second}
 
 func httpPost(apiURL string, body []byte) {
 	resp, err := httpClient.Post(apiURL, "application/json", bytes.NewReader(body))
 	if err != nil {
+		logError("[http] POST %s: %v", apiURL, err)
 		return
+	}
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		logError("[http] POST %s: status=%d body=%s", apiURL, resp.StatusCode, string(respBody))
 	}
 	resp.Body.Close()
 }
@@ -383,6 +400,13 @@ func lastAssistantText(path string) string {
 // ── main ─────────────────────────────────────────────────
 
 func main() {
+	// 捕捉所有 panic，静默记录日志，确保永远 exit 0
+	defer func() {
+		if r := recover(); r != nil {
+			logError("[panic] %v", r)
+		}
+	}()
+
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
 		case "install":
@@ -398,12 +422,17 @@ func main() {
 	}
 
 	data, err := io.ReadAll(os.Stdin)
-	if err != nil || len(data) == 0 {
+	if err != nil {
+		logError("[stdin] read error: %v", err)
+		os.Exit(0)
+	}
+	if len(data) == 0 {
 		os.Exit(0)
 	}
 
 	var p HookPayload
-	if json.Unmarshal(data, &p) != nil {
+	if err := json.Unmarshal(data, &p); err != nil {
+		logError("[stdin] JSON parse error: %v (data=%s)", err, truncateBytes(string(data), 200))
 		os.Exit(0)
 	}
 
