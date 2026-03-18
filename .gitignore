@@ -1,0 +1,4 @@
+dist/
+claude-notify-darwin-*
+claude-notify-linux-*
+claude-notify-windows-*
