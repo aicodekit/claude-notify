@@ -23,7 +23,7 @@ APPS := $(shell \
 )
 
 # Default target
-.PHONY: all clean build release tidy help
+.PHONY: all clean build release install uninstall tidy help
 
 all: build
 
@@ -44,6 +44,14 @@ release: clean tidy
 		$(call build_release_platform,$(platform)) \
 	)
 	@echo "Release build completed!"
+
+# Install: build + self-install to ~/.claude/hooks/
+install: build
+	@$(DIST_DIR)/$(PROJECT_NAME) install
+
+# Uninstall: remove hooks and binary
+uninstall:
+	@~/.claude/hooks/$(PROJECT_NAME) uninstall || $(DIST_DIR)/$(PROJECT_NAME) uninstall 2>/dev/null || echo "Binary not found"
 
 # Tidy dependencies
 tidy:
@@ -119,12 +127,14 @@ endef
 # Help information
 help:
 	@echo "Available targets:"
-	@echo "  all     - Build binaries for current platform (default)"
-	@echo "  build   - Build binaries for current platform"
-	@echo "  release - Cross-compile release versions for all platforms"
-	@echo "  tidy    - Tidy Go module dependencies"
-	@echo "  clean   - Clean dist directory"
-	@echo "  help    - Show this help information"
+	@echo "  all       - Build binaries for current platform (default)"
+	@echo "  build     - Build binaries for current platform"
+	@echo "  install   - Build + install to ~/.claude/hooks/ and configure settings.json"
+	@echo "  uninstall - Remove hooks from settings.json and delete binary"
+	@echo "  release   - Cross-compile release versions for all platforms"
+	@echo "  tidy      - Tidy Go module dependencies"
+	@echo "  clean     - Clean dist directory"
+	@echo "  help      - Show this help information"
 	@echo ""
 	@echo "Project information:"
 	@echo "  Project name: $(PROJECT_NAME)"
