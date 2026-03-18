@@ -1,4 +1,4 @@
-module github.com/longkeyy/claude-notify
+module github.com/aicodekit/claude-notify
 
 go 1.25.0
 
