@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -709,14 +710,13 @@ func installBinary() error {
 		return nil
 	}
 
-	// 比较文件大小，相同则跳过
-	srcInfo, err := os.Stat(srcPath)
-	if err != nil {
-		return fmt.Errorf("cannot stat source binary: %w", err)
-	}
-	if destInfo, err := os.Stat(destPath); err == nil && destInfo.Size() == srcInfo.Size() {
-		fmt.Println("  Binary already up-to-date, skipped.")
-		return nil
+	// 比较版本号：运行已安装的二进制获取版本，与当前版本对比
+	if installedVer := getInstalledVersion(destPath); installedVer != "" {
+		if installedVer >= Version {
+			fmt.Printf("  Binary already up-to-date (installed=%s, current=%s), skipped.\n", installedVer, Version)
+			return nil
+		}
+		fmt.Printf("  Upgrading: %s → %s\n", installedVer, Version)
 	}
 
 	src, err := os.ReadFile(srcPath)
@@ -727,6 +727,19 @@ func installBinary() error {
 		return fmt.Errorf("cannot write binary: %w", err)
 	}
 	return nil
+}
+
+func getInstalledVersion(binPath string) string {
+	out, err := exec.Command(binPath, "version").Output()
+	if err != nil {
+		return ""
+	}
+	// 输出格式: "claude-notify 20260318134136"
+	parts := strings.Fields(strings.TrimSpace(string(out)))
+	if len(parts) >= 2 {
+		return parts[len(parts)-1]
+	}
+	return ""
 }
 
 // hookEntryJSON is the raw JSON value for each hook event
