@@ -239,8 +239,10 @@ func newSender(key string) Sender {
 
 // ── 工具函数 ──────────────────────────────────────────────
 
+var httpClient = &http.Client{Timeout: 5 * time.Second}
+
 func httpPost(apiURL string, body []byte) {
-	resp, err := http.Post(apiURL, "application/json", bytes.NewReader(body))
+	resp, err := httpClient.Post(apiURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return
 	}
