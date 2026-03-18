@@ -709,6 +709,16 @@ func installBinary() error {
 		return nil
 	}
 
+	// 比较文件大小，相同则跳过
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("cannot stat source binary: %w", err)
+	}
+	if destInfo, err := os.Stat(destPath); err == nil && destInfo.Size() == srcInfo.Size() {
+		fmt.Println("  Binary already up-to-date, skipped.")
+		return nil
+	}
+
 	src, err := os.ReadFile(srcPath)
 	if err != nil {
 		return fmt.Errorf("cannot read binary: %w", err)
