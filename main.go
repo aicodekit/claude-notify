@@ -411,10 +411,10 @@ func main() {
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
 		case "install":
-			cmdInstall(hasFlag(os.Args[2:], "--project"))
+			cmdInstall(hasFlag(os.Args[2:], "--project", "-p"))
 			return
 		case "uninstall":
-			cmdUninstall(hasFlag(os.Args[2:], "--project"))
+			cmdUninstall(hasFlag(os.Args[2:], "--project", "-p"))
 			return
 		case "version", "--version", "-v":
 			fmt.Println("claude-notify " + Version)
@@ -602,44 +602,57 @@ const (
 
 var hookEvents = []string{"UserPromptSubmit", "PostToolUse", "Stop", "Notification"}
 
-func hasFlag(args []string, flag string) bool {
+func hasFlag(args []string, flags ...string) bool {
 	for _, a := range args {
-		if a == flag {
-			return true
+		for _, f := range flags {
+			if a == f {
+				return true
+			}
 		}
 	}
 	return false
 }
 
 func cmdInstall(projectMode bool) {
-	// 全局模式始终拷贝；项目模式检测目标不存在时也拷贝
-	needCopy := !projectMode
+	// 全局模式始终尝试拷贝；项目模式检测目标不存在时也拷贝
+	binaryCopied := false
+	tryInstallBinary := !projectMode
 	if projectMode {
 		home, _ := os.UserHomeDir()
 		if _, err := os.Stat(filepath.Join(home, installDir, binaryName)); os.IsNotExist(err) {
-			needCopy = true
+			tryInstallBinary = true
 		}
 	}
-	if needCopy {
-		if err := installBinary(); err != nil {
+	if tryInstallBinary {
+		copied, err := installBinary()
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+		binaryCopied = copied
 	}
 
 	settingsPath := settingsFilePath(projectMode)
-	if err := addHooksToSettings(settingsPath); err != nil {
+	hooksChanged, err := addHooksToSettings(settingsPath)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
+	if !binaryCopied && !hooksChanged {
+		fmt.Println("✓ claude-notify already installed, nothing to do.")
+		return
+	}
+
 	fmt.Println("✓ claude-notify installed successfully!")
-	if needCopy {
+	if binaryCopied {
 		home, _ := os.UserHomeDir()
 		fmt.Printf("  Binary: %s\n", filepath.Join(home, installDir, binaryName))
 	}
-	fmt.Printf("  Hooks:  %s\n", settingsPath)
-	fmt.Printf("  Events: %s\n", strings.Join(hookEvents, ", "))
+	if hooksChanged {
+		fmt.Printf("  Hooks:  %s\n", settingsPath)
+		fmt.Printf("  Events: %s\n", strings.Join(hookEvents, ", "))
+	}
 
 	keyPath := "~/.claude/notify_key"
 	if projectMode {
@@ -684,49 +697,49 @@ func settingsFilePath(projectMode bool) string {
 	return filepath.Join(home, ".claude", "settings.json")
 }
 
-func installBinary() error {
+func installBinary() (copied bool, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("cannot determine home directory: %w", err)
+		return false, fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
 	destDir := filepath.Join(home, installDir)
 	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("cannot create directory %s: %w", destDir, err)
+		return false, fmt.Errorf("cannot create directory %s: %w", destDir, err)
 	}
 
 	srcPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("cannot determine executable path: %w", err)
+		return false, fmt.Errorf("cannot determine executable path: %w", err)
 	}
 	srcPath, err = filepath.EvalSymlinks(srcPath)
 	if err != nil {
-		return fmt.Errorf("cannot resolve executable path: %w", err)
+		return false, fmt.Errorf("cannot resolve executable path: %w", err)
 	}
 
 	destPath := filepath.Join(destDir, binaryName)
 	if srcPath == destPath {
 		fmt.Println("  Binary already at target location, skipped.")
-		return nil
+		return false, nil
 	}
 
 	// 比较版本号：运行已安装的二进制获取版本，与当前版本对比
 	if installedVer := getInstalledVersion(destPath); installedVer != "" {
 		if installedVer >= Version {
 			fmt.Printf("  Binary already up-to-date (installed=%s, current=%s), skipped.\n", installedVer, Version)
-			return nil
+			return false, nil
 		}
 		fmt.Printf("  Upgrading: %s → %s\n", installedVer, Version)
 	}
 
 	src, err := os.ReadFile(srcPath)
 	if err != nil {
-		return fmt.Errorf("cannot read binary: %w", err)
+		return false, fmt.Errorf("cannot read binary: %w", err)
 	}
 	if err := os.WriteFile(destPath, src, 0755); err != nil {
-		return fmt.Errorf("cannot write binary: %w", err)
+		return false, fmt.Errorf("cannot write binary: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 func getInstalledVersion(binPath string) string {
@@ -742,39 +755,76 @@ func getInstalledVersion(binPath string) string {
 	return ""
 }
 
-// hookEntryJSON is the raw JSON value for each hook event
-const hookEntryJSON = `[{"hooks":[{"type":"command","command":"` + hookCommand + `"}]}]`
+// ourHookEntry is a single matcher entry for our hook
+const ourHookEntry = `{"hooks":[{"type":"command","command":"` + hookCommand + `"}]}`
 
-func addHooksToSettings(path string) error {
+// hasOurHook checks if our hook command is already in the event's hook array
+func hasOurHook(jsonStr, event string) bool {
+	arr := gjson.Get(jsonStr, "hooks."+event)
+	if !arr.Exists() || !arr.IsArray() {
+		return false
+	}
+	for _, item := range arr.Array() {
+		hooks := item.Get("hooks")
+		if !hooks.Exists() {
+			continue
+		}
+		for _, h := range hooks.Array() {
+			if h.Get("command").String() == hookCommand {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func addHooksToSettings(path string) (changed bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			data = []byte("{}")
 		} else {
-			return fmt.Errorf("cannot read %s: %w", path, err)
+			return false, fmt.Errorf("cannot read %s: %w", path, err)
 		}
 	}
 
+	// 追加模式：只在事件数组里没有我们的 hook 时追加，保留已有 hooks
 	jsonStr := string(data)
+	anyChanged := false
 	for _, event := range hookEvents {
-		jsonStr, err = sjson.SetRaw(jsonStr, "hooks."+event, hookEntryJSON)
-		if err != nil {
-			return fmt.Errorf("cannot set hooks.%s: %w", event, err)
+		if hasOurHook(jsonStr, event) {
+			continue
 		}
+		// 追加到已有数组末尾，如果 event 不存在则创建
+		arr := gjson.Get(jsonStr, "hooks."+event)
+		if arr.Exists() && arr.IsArray() {
+			idx := len(arr.Array())
+			jsonStr, err = sjson.SetRaw(jsonStr, fmt.Sprintf("hooks.%s.%d", event, idx), ourHookEntry)
+		} else {
+			jsonStr, err = sjson.SetRaw(jsonStr, "hooks."+event, "["+ourHookEntry+"]")
+		}
+		if err != nil {
+			return false, fmt.Errorf("cannot set hooks.%s: %w", event, err)
+		}
+		anyChanged = true
+	}
+
+	if !anyChanged {
+		return false, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("cannot create directory: %w", err)
+		return false, fmt.Errorf("cannot create directory: %w", err)
 	}
 
 	// Pretty-print with 2-space indent to match existing style
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, []byte(jsonStr), "", "  "); err != nil {
-		return fmt.Errorf("cannot format JSON: %w", err)
+		return false, fmt.Errorf("cannot format JSON: %w", err)
 	}
 	buf.WriteByte('\n')
 
-	return os.WriteFile(path, buf.Bytes(), 0644)
+	return true, os.WriteFile(path, buf.Bytes(), 0644)
 }
 
 func removeHooksFromSettings(path string) error {
@@ -789,7 +839,29 @@ func removeHooksFromSettings(path string) error {
 
 	jsonStr := string(data)
 	for _, event := range hookEvents {
-		jsonStr, _ = sjson.Delete(jsonStr, "hooks."+event)
+		arr := gjson.Get(jsonStr, "hooks."+event)
+		if !arr.Exists() || !arr.IsArray() {
+			continue
+		}
+		// 从后往前删除包含我们 command 的条目，保留其它 hooks
+		items := arr.Array()
+		for i := len(items) - 1; i >= 0; i-- {
+			hooks := items[i].Get("hooks")
+			if !hooks.Exists() {
+				continue
+			}
+			for _, h := range hooks.Array() {
+				if h.Get("command").String() == hookCommand {
+					jsonStr, _ = sjson.Delete(jsonStr, fmt.Sprintf("hooks.%s.%d", event, i))
+					break
+				}
+			}
+		}
+		// 如果事件数组变空了，删除整个事件 key
+		remaining := gjson.Get(jsonStr, "hooks."+event)
+		if remaining.Exists() && remaining.IsArray() && len(remaining.Array()) == 0 {
+			jsonStr, _ = sjson.Delete(jsonStr, "hooks."+event)
+		}
 	}
 
 	// If hooks object is now empty, remove it entirely
